@@ -54,7 +54,7 @@
 #define MPU6050_ADDR             0x68    // AD0 tied LOW; use 0x69 if AD0 is HIGH
 #define MOTION_SAMPLE_MS           10    // 100 Hz motion sampling
 #define MOTION_LOG_MS             500    // throttle Serial logs to 2 per second
-#define CLASH_EFFECT_MS           210    // white flash duration after a solid impact
+#define CLASH_EFFECT_MS           150    // white flash duration after a solid impact
 #define CLASH_LED_START            40    // first LED in localized clash flash
 #define CLASH_LED_END              50    // last LED in localized clash flash
 #define CLASH_COOLDOWN_MS         550    // ignore repeat hits during blade bounce

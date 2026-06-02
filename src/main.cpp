@@ -39,7 +39,7 @@
 // --- Timing (milliseconds) ---
 #define DEBOUNCE_MS          50   // ignore noise shorter than this
 #define SHORT_PRESS_MAX     500   // press < 500 ms = short press (color cycle)
-#define LONG_PRESS_MIN      1000   // press ≥ 1000 ms = long press  (on/off toggle)
+#define LONG_PRESS_MIN      600   // press ≥ 600 ms = long press  (on/off toggle)
 #define CONFIG_HOLD_MS     5000   // hold 5 s → enter Wi-Fi config mode
 
 // --- Animation speeds ---
@@ -55,9 +55,9 @@
 #define MOTION_SAMPLE_MS           10    // 100 Hz motion sampling
 #define MOTION_LOG_MS             500    // throttle Serial logs to 2 per second
 #define CLASH_EFFECT_MS           150    // white flash duration after a solid impact
-#define CLASH_LED_START            40    // first LED in localized clash flash
+#define CLASH_LED_START            35    // first LED in localized clash flash
 #define CLASH_LED_END              50    // last LED in localized clash flash
-#define CLASH_COOLDOWN_MS         550    // ignore repeat hits during blade bounce
+#define CLASH_COOLDOWN_MS         350    // ignore repeat hits during blade bounce
 #define CLASH_MIN_TOTAL_G        2.80f   // absolute acceleration required for impact
 #define CLASH_MIN_DELTA_G        1.65f   // acceleration spike required for impact
 #define SWING_GYRO_DPS         180.0f    // subtle brightness response while swinging
@@ -166,9 +166,9 @@ SaberColor COLOR_PALETTE[] = {
     {"Blue", 0x00, 0x60, 0xFF},
     {"Green", 0x00, 0xDD, 0x00},
     {"Red", 0xFF, 0x00, 0x00},
-    {"Purple", 0xAA, 0x00, 0xFF},
-    {"Yellow", 0xFF, 0xCC, 0x00},
-    {"White", 0xFF, 0xFF, 0xFF},
+    {"Purple", 0x40, 0x00, 0xFF},
+    {"Yellow", 0xFF, 0xFF, 0x00},
+    {"White", 0xEF, 0xEF, 0xFF},
     {"Custom", 0xFF, 0x99, 0x00}
 };
 

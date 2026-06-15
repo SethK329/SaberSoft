@@ -41,6 +41,7 @@
 #define SHORT_PRESS_MAX     500   // press < 500 ms = short press (color cycle)
 #define LONG_PRESS_MIN      600   // press ≥ 600 ms = long press  (on/off toggle)
 #define CONFIG_HOLD_MS     5000   // hold 5 s → enter Wi-Fi config mode
+#define CONFIG_EXIT_HOLD_MS 1000  // hold 1 s in config mode → exit Wi-Fi config mode
 
 // --- Animation speeds ---
 #define IGNITE_STEP_MS    12      // ms between each LED lighting during ignition
@@ -212,6 +213,7 @@ uint32_t lerpColor(uint32_t from, uint32_t to, uint8_t t) {
 //      duration ≥ LONG_PRESS_MIN   → long press   → toggle saber on/off
 //    While held:
 //      duration ≥ CONFIG_HOLD_MS   → enter config mode
+//      duration ≥ CONFIG_EXIT_HOLD_MS in CONFIG → exit config mode
 // ============================================================
 
 // Forward declarations
@@ -219,6 +221,7 @@ void startIgnition();
 void startRetraction();
 void cycleColor();
 void enterConfigMode();
+void exitConfigMode();
 void loadSettings();
 void saveSettings();
 void saveSettingsFromWeb(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
@@ -257,9 +260,16 @@ void handleButton() {
         configTriggered = false;
     }
 
-    // --- While held: check for very long hold → config mode ---
+    // --- While held: handle config mode entry/exit ---
     if (btnHeld && pressed && !configTriggered) {
         long holdDuration = millis() - btnPressStart;
+
+        if (currentState == STATE_CONFIG && holdDuration >= CONFIG_EXIT_HOLD_MS) {
+            configTriggered = true;  // don't trigger again this hold
+            exitConfigMode();
+            return;
+        }
+
         if (holdDuration >= CONFIG_HOLD_MS) {
             configTriggered = true;  // don't trigger again this hold
             enterConfigMode();

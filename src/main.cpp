@@ -54,7 +54,7 @@
 #define MPU6050_ADDR             0x68    // AD0 tied LOW; use 0x69 if AD0 is HIGH
 #define MOTION_SAMPLE_MS           10    // 100 Hz motion sampling
 #define MOTION_LOG_MS             500    // throttle Serial logs to 2 per second
-#define CLASH_EFFECT_MS           150    // white flash duration after a solid impact
+#define CLASH_EFFECT_MS           180    // white flash duration after a solid impact
 #define CLASH_LED_START            35    // first LED in localized clash flash
 #define CLASH_LED_END              50    // last LED in localized clash flash
 #define CLASH_COOLDOWN_MS         350    // ignore repeat hits during blade bounce
@@ -70,6 +70,7 @@
 #define NVS_NAMESPACE   "saber"
 #define NVS_KEY_COLOR   "color_idx"
 #define NVS_KEY_BRIGHT  "brightness"
+#define NVS_KEY_CUSTOM  "custom_rgb"
 
 
 // ============================================================
@@ -167,12 +168,13 @@ SaberColor COLOR_PALETTE[] = {
     {"Green", 0x00, 0xDD, 0x00},
     {"Red", 0xFF, 0x00, 0x00},
     {"Purple", 0x40, 0x00, 0xFF},
-    {"Yellow", 0xFF, 0xFF, 0x00},
+    {"Yellow", 0xDF, 0xFF, 0x00},
     {"White", 0xEF, 0xEF, 0xFF},
     {"Custom", 0xFF, 0x99, 0x00}
 };
 
 const uint8_t PALETTE_SIZE = sizeof(COLOR_PALETTE) / sizeof(COLOR_PALETTE[0]);
+const uint8_t CUSTOM_COLOR_IDX = PALETTE_SIZE - 1;
 
 // Returns the current blade color as a packed strip color value
 uint32_t currentBladeColor() {
@@ -277,7 +279,7 @@ void handleButton() {
 
         if (duration < SHORT_PRESS_MAX) {
             // Short press → cycle color (only if saber is ON or OFF)
-            if (currentState == STATE_ON || currentState == STATE_OFF) {
+            if (currentState == STATE_ON) {
                 cycleColor();
             }
         } else if (duration >= LONG_PRESS_MIN) {
@@ -299,18 +301,24 @@ void handleButton() {
 //  We store:
 //    color_idx  — palette index (0–PALETTE_SIZE-1)
 //    brightness — uint8 (5–255)
-//
-//  When the user saves a custom color via web UI we find the
-//  closest palette entry and save that index. Custom RGB
-//  could also be stored if you extend the palette later.
+//    custom_rgb — packed RGB color for the custom palette slot
 // ============================================================
 
 void loadSettings()
 {
     prefs.begin(NVS_NAMESPACE, /*readOnly=*/true);
+    const SaberColor& defaultCustom = COLOR_PALETTE[CUSTOM_COLOR_IDX];
+    uint32_t customRgb = prefs.getUInt(NVS_KEY_CUSTOM,
+                                       ((uint32_t)defaultCustom.r << 16) |
+                                       ((uint32_t)defaultCustom.g << 8) |
+                                       (uint32_t)defaultCustom.b);
     currentColorIdx = prefs.getUChar(NVS_KEY_COLOR, 0);
     currentBrightness = prefs.getUChar(NVS_KEY_BRIGHT, BRIGHTNESS_DEFAULT);
     prefs.end();
+
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].r = (customRgb >> 16) & 0xFF;
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].g = (customRgb >> 8) & 0xFF;
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].b = customRgb & 0xFF;
 
     // Bounds check
     if (currentColorIdx >= PALETTE_SIZE)
@@ -335,10 +343,10 @@ void saveSettings()
 uint8_t closestPaletteIndex(uint8_t r, uint8_t g, uint8_t b)
 {
     // Update the custom color slot directly in the palette
-    COLOR_PALETTE[PALETTE_SIZE - 1].r = r;
-    COLOR_PALETTE[PALETTE_SIZE - 1].g = g;
-    COLOR_PALETTE[PALETTE_SIZE - 1].b = b;
-    return PALETTE_SIZE - 1; // Return the index of the custom slot
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].r = r;
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].g = g;
+    COLOR_PALETTE[CUSTOM_COLOR_IDX].b = b;
+    return CUSTOM_COLOR_IDX; // Return the index of the custom slot
 }
 
 // Called after web UI save — finds closest preset, saves brightness

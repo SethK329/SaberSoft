@@ -60,11 +60,12 @@
 #define CLASH_COOLDOWN_MS         350    // ignore repeat hits during blade bounce
 #define CLASH_MIN_TOTAL_G        2.80f   // absolute acceleration required for impact
 #define CLASH_MIN_DELTA_G        1.65f   // acceleration spike required for impact
-#define CLASH_LOCATION_WINDOW_MS   18    // short peak capture window for zone estimate
-#define CLASH_LOCATION_SAMPLE_MS    4    // delay between extra peak samples
+#define CLASH_LOCATION_WINDOW_MS   30    // short peak capture window for zone estimate
+#define CLASH_LOCATION_SAMPLE_MS    3    // delay between extra peak samples
 #define CLASH_SCORE_MIN_ACCEL_G  0.10f   // guard against divide-by-zero / invalid data
-#define CLASH_SCORE_LOWER        80.0f   // below this = bottom zone
-#define CLASH_SCORE_UPPER       160.0f   // below this = middle; above = top
+#define CLASH_SCORE_BOTTOM_MAX   25.0f   // below this = clear bottom hit
+#define CLASH_SCORE_TOP_MIN     110.0f   // above this can be a clear top hit
+#define CLASH_TOP_MIN_GYRO_DPS  220.0f   // top hit must have real rotational energy
 #define SWING_GYRO_DPS         180.0f    // subtle brightness response while swinging
 
 // --- Wi-Fi Access Point ---
@@ -602,11 +603,11 @@ ClashZone classifyClashZone(float accelMagnitudeG, float gyroMagnitudeDps, float
         return CLASH_ZONE_MIDDLE;
     }
 
-    if (impactScore < CLASH_SCORE_LOWER)
+    if (impactScore < CLASH_SCORE_BOTTOM_MAX)
         return CLASH_ZONE_BOTTOM;
-    if (impactScore < CLASH_SCORE_UPPER)
-        return CLASH_ZONE_MIDDLE;
-    return CLASH_ZONE_TOP;
+    if (impactScore >= CLASH_SCORE_TOP_MIN && gyroMagnitudeDps >= CLASH_TOP_MIN_GYRO_DPS)
+        return CLASH_ZONE_TOP;
+    return CLASH_ZONE_MIDDLE;
 }
 
 int clashZoneCenterLed(ClashZone zone)

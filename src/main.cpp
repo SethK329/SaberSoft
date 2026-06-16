@@ -56,11 +56,15 @@
 #define MOTION_SAMPLE_MS           10    // 100 Hz motion sampling
 #define MOTION_LOG_MS             500    // throttle Serial logs to 2 per second
 #define CLASH_EFFECT_MS           180    // white flash duration after a solid impact
-#define CLASH_LED_START            35    // first LED in localized clash flash
-#define CLASH_LED_END              50    // last LED in localized clash flash
+#define CLASH_FLASH_WIDTH          13    // localized clash flash width in LEDs
 #define CLASH_COOLDOWN_MS         350    // ignore repeat hits during blade bounce
 #define CLASH_MIN_TOTAL_G        2.80f   // absolute acceleration required for impact
 #define CLASH_MIN_DELTA_G        1.65f   // acceleration spike required for impact
+#define CLASH_LOCATION_WINDOW_MS   18    // short peak capture window for zone estimate
+#define CLASH_LOCATION_SAMPLE_MS    4    // delay between extra peak samples
+#define CLASH_SCORE_MIN_ACCEL_G  0.10f   // guard against divide-by-zero / invalid data
+#define CLASH_SCORE_LOWER        80.0f   // below this = bottom zone
+#define CLASH_SCORE_UPPER       160.0f   // below this = middle; above = top
 #define SWING_GYRO_DPS         180.0f    // subtle brightness response while swinging
 
 // --- Wi-Fi Access Point ---
@@ -121,6 +125,12 @@ enum SaberState {
 
 SaberState currentState = STATE_OFF;
 
+enum ClashZone {
+    CLASH_ZONE_BOTTOM = 0,
+    CLASH_ZONE_MIDDLE = 1,
+    CLASH_ZONE_TOP = 2
+};
+
 // Animation progress tracking
 int  animLedIndex   = 0;       // which LED the animation is currently at
 long animLastStep   = 0;       // millis() timestamp of last animation tick
@@ -149,6 +159,7 @@ float gyroZDps             = 0.0f;
 bool clashActive           = false;
 long clashStartedAt        = 0;
 long clashLastStep         = 0;
+ClashZone currentClashZone = CLASH_ZONE_MIDDLE;
 
 
 // ============================================================
@@ -229,6 +240,7 @@ void initMotion();
 void tickMotion();
 void tickClashEffect();
 void triggerClashEffect(float totalG, float deltaG);
+ClashZone classifyClashZone(float accelMagnitudeG, float gyroMagnitudeDps, float& impactScore);
 
 // Button state
 bool     btnLastRaw      = HIGH;    // last raw GPIO read
@@ -551,6 +563,65 @@ bool readMpuSample()
     return true;
 }
 
+float currentAccelMagnitudeG()
+{
+    return sqrtf(accelXG * accelXG + accelYG * accelYG + accelZG * accelZG);
+}
+
+float currentGyroMagnitudeDps()
+{
+    return sqrtf(gyroXDps * gyroXDps + gyroYDps * gyroYDps + gyroZDps * gyroZDps);
+}
+
+void captureClashPeaks(float& peakAccelG, float& peakGyroDps)
+{
+    long startedAt = millis();
+
+    while ((millis() - startedAt) < CLASH_LOCATION_WINDOW_MS) {
+        delay(CLASH_LOCATION_SAMPLE_MS);
+        if (!readMpuSample())
+            continue;
+
+        peakAccelG = max(peakAccelG, currentAccelMagnitudeG());
+        peakGyroDps = max(peakGyroDps, currentGyroMagnitudeDps());
+    }
+}
+
+ClashZone classifyClashZone(float accelMagnitudeG, float gyroMagnitudeDps, float& impactScore)
+{
+    impactScore = 0.0f;
+
+    if (!isfinite(accelMagnitudeG) || !isfinite(gyroMagnitudeDps) ||
+        accelMagnitudeG < CLASH_SCORE_MIN_ACCEL_G || gyroMagnitudeDps < 0.0f) {
+        return CLASH_ZONE_MIDDLE;
+    }
+
+    impactScore = gyroMagnitudeDps / max(accelMagnitudeG, CLASH_SCORE_MIN_ACCEL_G);
+    if (!isfinite(impactScore)) {
+        impactScore = 0.0f;
+        return CLASH_ZONE_MIDDLE;
+    }
+
+    if (impactScore < CLASH_SCORE_LOWER)
+        return CLASH_ZONE_BOTTOM;
+    if (impactScore < CLASH_SCORE_UPPER)
+        return CLASH_ZONE_MIDDLE;
+    return CLASH_ZONE_TOP;
+}
+
+int clashZoneCenterLed(ClashZone zone)
+{
+    switch (zone) {
+        case CLASH_ZONE_BOTTOM:
+            return 10;
+        case CLASH_ZONE_TOP:
+            return 50;
+        case CLASH_ZONE_MIDDLE:
+        default:
+            return 30;
+    }
+}
+
 void initMotion()
 {
     Wire.begin(MOTION_SDA_PIN, MOTION_SCL_PIN);
@@ -596,7 +667,7 @@ void tickMotion()
         return;
     }
 
-    float totalG = sqrtf(accelXG * accelXG + accelYG * accelYG + accelZG * accelZG);
+    float totalG = currentAccelMagnitudeG();
     float deltaG = fabsf(totalG - lastAccelMagnitudeG);
     lastAccelMagnitudeG = (lastAccelMagnitudeG * 0.72f) + (totalG * 0.28f);
 
@@ -615,13 +686,21 @@ void tickMotion()
 
 void triggerClashEffect(float totalG, float deltaG)
 {
+    float peakAccelG = totalG;
+    float peakGyroDps = currentGyroMagnitudeDps();
+    float impactScore = 0.0f;
+
+    captureClashPeaks(peakAccelG, peakGyroDps);
+    currentClashZone = classifyClashZone(peakAccelG, peakGyroDps, impactScore);
+
     clashActive = true;
     clashStartedAt = millis();
     clashLastStep = 0;
     clashLastTrigger = millis();
     fadingColor = false;
 
-    Serial.printf("[Clash] Solid impact detected: total=%.2fg delta=%.2fg\n", totalG, deltaG);
+    Serial.printf("[Clash] accel=%.2fg gyro=%.0fdps score=%.1f zone=%d delta=%.2fg\n",
+                  peakAccelG, peakGyroDps, impactScore, (int)currentClashZone, deltaG);
 }
 
 void tickClashEffect()
@@ -643,8 +722,9 @@ void tickClashEffect()
     clashLastStep = millis();
 
     uint8_t whiteLevel = (elapsed < 45) ? 255 : (uint8_t)map(elapsed, 45, CLASH_EFFECT_MS, 225, 80);
-    int firstClashLed = constrain(CLASH_LED_START, 0, LED_COUNT - 1);
-    int lastClashLed = constrain(CLASH_LED_END, firstClashLed, LED_COUNT - 1);
+    int centerLed = clashZoneCenterLed(currentClashZone);
+    int firstClashLed = constrain(centerLed - ((CLASH_FLASH_WIDTH - 1) / 2), 0, LED_COUNT - 1);
+    int lastClashLed = constrain(centerLed + (CLASH_FLASH_WIDTH / 2), firstClashLed, LED_COUNT - 1);
 
     strip.setBrightness(BRIGHTNESS_MAX);
     strip.fill(currentBladeColor());

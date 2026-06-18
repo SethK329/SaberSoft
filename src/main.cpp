@@ -78,6 +78,7 @@
 #define MOTION_GYRO_WEIGHT       1.0f    // visualizer intensity contribution per dps
 #define MOTION_HUE_SMOOTHING     0.22f   // EMA alpha; higher = more responsive
 #define MOTION_BRIGHT_SMOOTHING  0.28f   // EMA alpha; higher = more responsive
+#define MOTION_ANGLE_MIN_PLANAR_G 0.08f  // hold hue if roll angle is poorly defined
 #define MOTION_VISUALIZER_LOG_MS 100     // 10 Hz debug logs
 
 // --- Wi-Fi Access Point ---
@@ -827,8 +828,14 @@ void tickMotionVisualizer()
     float motionIntensity = (MOTION_GYRO_WEIGHT * gyroMagnitude) +
                             (MOTION_ACCEL_WEIGHT * accelMagnitude);
 
-    float motionAngle = atan2f(gyroYDps, gyroXDps);
-    float targetHue = ((motionAngle + PI) / (2.0f * PI)) * 65535.0f;
+    float planarAccelG = sqrtf(accelXG * accelXG + accelYG * accelYG);
+    float bladeAngle = atan2f(accelYG, accelXG);
+    float targetHue = visualizerSmoothingReady
+                          ? visualizerHueSmoothed
+                          : 0.0f;
+    if (planarAccelG >= MOTION_ANGLE_MIN_PLANAR_G) {
+        targetHue = ((bladeAngle + PI) / (2.0f * PI)) * 65535.0f;
+    }
     uint8_t targetBrightness = motionBrightnessFromIntensity(motionIntensity);
 
     if (!visualizerSmoothingReady) {
@@ -836,11 +843,9 @@ void tickMotionVisualizer()
         visualizerBrightnessSmoothed = targetBrightness;
         visualizerSmoothingReady = true;
     } else {
-        if (gyroMagnitude >= GYRO_MIN_THRESHOLD) {
-            visualizerHueSmoothed = smoothCircularHue(visualizerHueSmoothed,
-                                                      targetHue,
-                                                      MOTION_HUE_SMOOTHING);
-        }
+        visualizerHueSmoothed = smoothCircularHue(visualizerHueSmoothed,
+                                                  targetHue,
+                                                  MOTION_HUE_SMOOTHING);
         visualizerBrightnessSmoothed +=
             ((float)targetBrightness - visualizerBrightnessSmoothed) * MOTION_BRIGHT_SMOOTHING;
     }
@@ -859,8 +864,9 @@ void tickMotionVisualizer()
 
     if ((millis() - visualizerLastLog) >= MOTION_VISUALIZER_LOG_MS) {
         visualizerLastLog = millis();
-        Serial.printf("[Visualizer] gx=%+.0f gy=%+.0f gz=%+.0f mag=%.0f hue=%u brightness=%u\n",
-                      gyroXDps, gyroYDps, gyroZDps, gyroMagnitude, hue, brightness);
+        Serial.printf("[Visualizer] gx=%+.0f gy=%+.0f gz=%+.0f mag=%.0f angle=%.1f hue=%u brightness=%u\n",
+                      gyroXDps, gyroYDps, gyroZDps, gyroMagnitude,
+                      bladeAngle * 180.0f / PI, hue, brightness);
     }
 }
 

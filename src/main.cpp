@@ -76,9 +76,9 @@
 #define GYRO_MAX_THRESHOLD     650.0f    // dps above this maps to maximum brightness
 #define MOTION_ACCEL_WEIGHT     28.0f    // visualizer intensity contribution per g
 #define MOTION_GYRO_WEIGHT       1.0f    // visualizer intensity contribution per dps
-#define MOTION_HUE_SMOOTHING     0.22f   // EMA alpha; higher = more responsive
+#define MOTION_COLOR_SMOOTHING   0.18f   // EMA alpha; higher = more responsive
 #define MOTION_BRIGHT_SMOOTHING  0.28f   // EMA alpha; higher = more responsive
-#define MOTION_ANGLE_MIN_PLANAR_G 0.08f  // hold hue if roll angle is poorly defined
+#define MOTION_AXIS_DEADBAND_DPS 2.0f    // ignore tiny gyro drift while resting
 #define MOTION_VISUALIZER_LOG_MS 100     // 10 Hz debug logs
 
 // --- Wi-Fi Access Point ---
@@ -180,7 +180,12 @@ float gyroZDps             = 0.0f;
 
 // Motion Visualizer tracking
 bool visualizerSmoothingReady = false;
-float visualizerHueSmoothed = 0.0f;
+float visualizerAngleX = 0.0f;
+float visualizerAngleY = 120.0f;
+float visualizerAngleZ = 240.0f;
+float visualizerRSmoothed = 0.0f;
+float visualizerGSmoothed = 0.0f;
+float visualizerBSmoothed = 0.0f;
 float visualizerBrightnessSmoothed = MOTION_MIN_BRIGHTNESS;
 long visualizerLastLog = 0;
 
@@ -531,6 +536,9 @@ void startMotionVisualizer()
     fadingColor = false;
     clashActive = false;
     visualizerSmoothingReady = false;
+    visualizerAngleX = 0.0f;
+    visualizerAngleY = 120.0f;
+    visualizerAngleZ = 240.0f;
     strip.setBrightness(255);
 
     Serial.println("[Mode] Motion Visualizer ON");
@@ -786,22 +794,6 @@ void tickMotion()
     }
 }
 
-float smoothCircularHue(float currentHue, float targetHue, float alpha)
-{
-    float diff = targetHue - currentHue;
-    if (diff > 32768.0f)
-        diff -= 65536.0f;
-    else if (diff < -32768.0f)
-        diff += 65536.0f;
-
-    float nextHue = currentHue + (diff * alpha);
-    if (nextHue < 0.0f)
-        nextHue += 65536.0f;
-    else if (nextHue >= 65536.0f)
-        nextHue -= 65536.0f;
-    return nextHue;
-}
-
 uint8_t motionBrightnessFromIntensity(float motionIntensity)
 {
     float clamped = constrain(motionIntensity, GYRO_MIN_THRESHOLD, GYRO_MAX_THRESHOLD);
@@ -810,13 +802,35 @@ uint8_t motionBrightnessFromIntensity(float motionIntensity)
     return (uint8_t)constrain(value, (float)MOTION_MIN_BRIGHTNESS, (float)MOTION_MAX_BRIGHTNESS);
 }
 
+float wrapDegrees(float angle)
+{
+    while (angle >= 360.0f)
+        angle -= 360.0f;
+    while (angle < 0.0f)
+        angle += 360.0f;
+    return angle;
+}
+
+float channelFromAxisAngle(float angleDegrees)
+{
+    float radians = angleDegrees * PI / 180.0f;
+    return (sinf(radians) + 1.0f) * 127.5f;
+}
+
+float applyAxisDeadband(float gyroDps)
+{
+    return (fabsf(gyroDps) < MOTION_AXIS_DEADBAND_DPS) ? 0.0f : gyroDps;
+}
+
 void tickMotionVisualizer()
 {
     if (!mpuReady)
         return;
-    if ((millis() - motionLastSample) < MOTION_SAMPLE_MS)
+    long now = millis();
+    long elapsedMs = now - motionLastSample;
+    if (elapsedMs < MOTION_SAMPLE_MS)
         return;
-    motionLastSample = millis();
+    motionLastSample = now;
 
     if (!readMpuSample()) {
         Serial.println("[Visualizer] MPU6050 read failed");
@@ -828,33 +842,38 @@ void tickMotionVisualizer()
     float motionIntensity = (MOTION_GYRO_WEIGHT * gyroMagnitude) +
                             (MOTION_ACCEL_WEIGHT * accelMagnitude);
 
-    float planarAccelG = sqrtf(accelXG * accelXG + accelYG * accelYG);
-    float bladeAngle = atan2f(accelYG, accelXG);
-    float targetHue = visualizerSmoothingReady
-                          ? visualizerHueSmoothed
-                          : 0.0f;
-    if (planarAccelG >= MOTION_ANGLE_MIN_PLANAR_G) {
-        targetHue = ((bladeAngle + PI) / (2.0f * PI)) * 65535.0f;
-    }
+    float dt = constrain((float)elapsedMs / 1000.0f, 0.0f, 0.05f);
+    visualizerAngleX = wrapDegrees(visualizerAngleX + (applyAxisDeadband(gyroXDps) * dt));
+    visualizerAngleY = wrapDegrees(visualizerAngleY + (applyAxisDeadband(gyroYDps) * dt));
+    visualizerAngleZ = wrapDegrees(visualizerAngleZ + (applyAxisDeadband(gyroZDps) * dt));
+
+    float targetR = channelFromAxisAngle(visualizerAngleX);
+    float targetG = channelFromAxisAngle(visualizerAngleY);
+    float targetB = channelFromAxisAngle(visualizerAngleZ);
     uint8_t targetBrightness = motionBrightnessFromIntensity(motionIntensity);
 
     if (!visualizerSmoothingReady) {
-        visualizerHueSmoothed = targetHue;
+        visualizerRSmoothed = targetR;
+        visualizerGSmoothed = targetG;
+        visualizerBSmoothed = targetB;
         visualizerBrightnessSmoothed = targetBrightness;
         visualizerSmoothingReady = true;
     } else {
-        visualizerHueSmoothed = smoothCircularHue(visualizerHueSmoothed,
-                                                  targetHue,
-                                                  MOTION_HUE_SMOOTHING);
+        visualizerRSmoothed += (targetR - visualizerRSmoothed) * MOTION_COLOR_SMOOTHING;
+        visualizerGSmoothed += (targetG - visualizerGSmoothed) * MOTION_COLOR_SMOOTHING;
+        visualizerBSmoothed += (targetB - visualizerBSmoothed) * MOTION_COLOR_SMOOTHING;
         visualizerBrightnessSmoothed +=
             ((float)targetBrightness - visualizerBrightnessSmoothed) * MOTION_BRIGHT_SMOOTHING;
     }
 
-    uint16_t hue = (uint16_t)constrain(visualizerHueSmoothed, 0.0f, 65535.0f);
     uint8_t brightness = (uint8_t)constrain(visualizerBrightnessSmoothed,
                                             (float)MOTION_MIN_BRIGHTNESS,
                                             (float)MOTION_MAX_BRIGHTNESS);
-    uint32_t color = strip.ColorHSV(hue, 255, brightness);
+    float brightnessScale = (float)brightness / 255.0f;
+    uint8_t r = (uint8_t)constrain(visualizerRSmoothed * brightnessScale, 0.0f, 255.0f);
+    uint8_t g = (uint8_t)constrain(visualizerGSmoothed * brightnessScale, 0.0f, 255.0f);
+    uint8_t b = (uint8_t)constrain(visualizerBSmoothed * brightnessScale, 0.0f, 255.0f);
+    uint32_t color = strip.Color(r, g, b);
 
     strip.setBrightness(255);
     strip.fill(color);
@@ -864,9 +883,10 @@ void tickMotionVisualizer()
 
     if ((millis() - visualizerLastLog) >= MOTION_VISUALIZER_LOG_MS) {
         visualizerLastLog = millis();
-        Serial.printf("[Visualizer] gx=%+.0f gy=%+.0f gz=%+.0f mag=%.0f angle=%.1f hue=%u brightness=%u\n",
+        Serial.printf("[Visualizer] gx=%+.0f gy=%+.0f gz=%+.0f mag=%.0f ax=%.0f ay=%.0f az=%.0f rgb=%u,%u,%u brightness=%u\n",
                       gyroXDps, gyroYDps, gyroZDps, gyroMagnitude,
-                      bladeAngle * 180.0f / PI, hue, brightness);
+                      visualizerAngleX, visualizerAngleY, visualizerAngleZ,
+                      r, g, b, brightness);
     }
 }
 

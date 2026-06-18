@@ -40,6 +40,7 @@
 #define DEBOUNCE_MS          50   // ignore noise shorter than this
 #define SHORT_PRESS_MAX     500   // press < 500 ms = short press (color cycle)
 #define LONG_PRESS_MIN      600   // press ≥ 600 ms = long press  (on/off toggle)
+#define MODE_TOGGLE_HOLD_MS 2000  // hold 2 s → toggle normal/visualizer mode
 #define CONFIG_HOLD_MS     5000   // hold 5 s → enter Wi-Fi config mode
 #define CONFIG_EXIT_HOLD_MS 1000  // hold 1 s in config mode → exit Wi-Fi config mode
 
@@ -67,6 +68,17 @@
 #define CLASH_SCORE_TOP_MIN     110.0f   // above this can be a clear top hit
 #define CLASH_TOP_MIN_GYRO_DPS  220.0f   // top hit must have real rotational energy
 #define SWING_GYRO_DPS         180.0f    // subtle brightness response while swinging
+
+// --- Motion Visualizer mode ---
+#define MOTION_MIN_BRIGHTNESS     8      // dim value when mostly still
+#define MOTION_MAX_BRIGHTNESS   125      // safe cap for fast movement
+#define GYRO_MIN_THRESHOLD      10.0f    // dps below this maps to minimum brightness
+#define GYRO_MAX_THRESHOLD     650.0f    // dps above this maps to maximum brightness
+#define MOTION_ACCEL_WEIGHT     28.0f    // visualizer intensity contribution per g
+#define MOTION_GYRO_WEIGHT       1.0f    // visualizer intensity contribution per dps
+#define MOTION_HUE_SMOOTHING     0.22f   // EMA alpha; higher = more responsive
+#define MOTION_BRIGHT_SMOOTHING  0.28f   // EMA alpha; higher = more responsive
+#define MOTION_VISUALIZER_LOG_MS 100     // 10 Hz debug logs
 
 // --- Wi-Fi Access Point ---
 #define WIFI_SSID   "SaberConfig"   // AP name (no password)
@@ -112,6 +124,7 @@ bool     saberIsOn         = false;
 //    OFF        — blade dark, waiting for input
 //    IGNITING   — ignition animation running base→tip
 //    ON         — blade solid, responding to button
+//    VISUALIZER — blade color/brightness driven directly by motion
 //    RETRACTING — retraction animation running tip→base
 //    CONFIG     — Wi-Fi AP active, webserver running
 // ============================================================
@@ -120,11 +133,19 @@ enum SaberState {
     STATE_OFF,
     STATE_IGNITING,
     STATE_ON,
+    STATE_MOTION_VISUALIZER,
     STATE_RETRACTING,
     STATE_CONFIG
 };
 
 SaberState currentState = STATE_OFF;
+
+enum OperatingMode {
+    MODE_SABER,
+    MODE_MOTION_VISUALIZER
+};
+
+OperatingMode selectedOperatingMode = MODE_SABER;
 
 enum ClashZone {
     CLASH_ZONE_BOTTOM = 0,
@@ -155,6 +176,12 @@ float accelZG              = 0.0f;
 float gyroXDps             = 0.0f;
 float gyroYDps             = 0.0f;
 float gyroZDps             = 0.0f;
+
+// Motion Visualizer tracking
+bool visualizerSmoothingReady = false;
+float visualizerHueSmoothed = 0.0f;
+float visualizerBrightnessSmoothed = MOTION_MIN_BRIGHTNESS;
+long visualizerLastLog = 0;
 
 // Clash effect tracking
 bool clashActive           = false;
@@ -231,6 +258,9 @@ uint32_t lerpColor(uint32_t from, uint32_t to, uint8_t t) {
 // Forward declarations
 void startIgnition();
 void startRetraction();
+void startMotionVisualizer();
+void stopMotionVisualizer();
+void toggleOperatingMode();
 void cycleColor();
 void enterConfigMode();
 void exitConfigMode();
@@ -239,6 +269,7 @@ void saveSettings();
 void saveSettingsFromWeb(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
 void initMotion();
 void tickMotion();
+void tickMotionVisualizer();
 void tickClashEffect();
 void triggerClashEffect(float totalG, float deltaG);
 ClashZone classifyClashZone(float accelMagnitudeG, float gyroMagnitudeDps, float& impactScore);
@@ -301,16 +332,21 @@ void handleButton() {
         long duration = millis() - btnPressStart;
 
         if (duration < SHORT_PRESS_MAX) {
-            // Short press → cycle color (only if saber is ON or OFF)
+            // Short press → cycle color while normal saber mode is ON
             if (currentState == STATE_ON) {
                 cycleColor();
             }
+        } else if (duration >= MODE_TOGGLE_HOLD_MS) {
+            // 2 s hold → toggle between normal saber and Motion Visualizer modes
+            toggleOperatingMode();
         } else if (duration >= LONG_PRESS_MIN) {
             // Long press → toggle on/off
             if (currentState == STATE_OFF) {
                 startIgnition();
             } else if (currentState == STATE_ON) {
                 startRetraction();
+            } else if (currentState == STATE_MOTION_VISUALIZER) {
+                stopMotionVisualizer();
             }
             // Ignore long press during animations or config
         }
@@ -430,6 +466,11 @@ void tickColorFade() {
 void startIgnition() {
     if (currentState != STATE_OFF) return;
 
+    if (selectedOperatingMode == MODE_MOTION_VISUALIZER) {
+        startMotionVisualizer();
+        return;
+    }
+
     currentState = STATE_IGNITING;
     animLedIndex = 0;
     animLastStep = millis();
@@ -476,6 +517,65 @@ void startRetraction() {
     fadingColor  = false;
 
     Serial.println("[Saber] Retracting");
+}
+
+void startMotionVisualizer()
+{
+    if (currentState != STATE_OFF && currentState != STATE_ON)
+        return;
+
+    selectedOperatingMode = MODE_MOTION_VISUALIZER;
+    currentState = STATE_MOTION_VISUALIZER;
+    saberIsOn = true;
+    fadingColor = false;
+    clashActive = false;
+    visualizerSmoothingReady = false;
+    strip.setBrightness(255);
+
+    Serial.println("[Mode] Motion Visualizer ON");
+}
+
+void stopMotionVisualizer()
+{
+    if (currentState != STATE_MOTION_VISUALIZER)
+        return;
+
+    strip.setBrightness(currentBrightness);
+    strip.clear();
+    strip.show();
+    currentState = STATE_OFF;
+    saberIsOn = false;
+    visualizerSmoothingReady = false;
+
+    Serial.println("[Mode] Motion Visualizer OFF");
+}
+
+void toggleOperatingMode()
+{
+    if (currentState == STATE_IGNITING || currentState == STATE_RETRACTING || currentState == STATE_CONFIG)
+        return;
+
+    selectedOperatingMode = (selectedOperatingMode == MODE_SABER)
+                                ? MODE_MOTION_VISUALIZER
+                                : MODE_SABER;
+
+    if (selectedOperatingMode == MODE_MOTION_VISUALIZER) {
+        if (currentState == STATE_ON || currentState == STATE_OFF) {
+            startMotionVisualizer();
+        }
+        Serial.println("[Mode] Selected Motion Visualizer");
+        return;
+    }
+
+    if (currentState == STATE_MOTION_VISUALIZER) {
+        strip.setBrightness(currentBrightness);
+        strip.fill(currentBladeColor());
+        strip.show();
+        currentState = STATE_ON;
+        saberIsOn = true;
+    }
+
+    Serial.println("[Mode] Selected normal saber");
 }
 
 void tickRetraction() {
@@ -685,6 +785,85 @@ void tickMotion()
     }
 }
 
+float smoothCircularHue(float currentHue, float targetHue, float alpha)
+{
+    float diff = targetHue - currentHue;
+    if (diff > 32768.0f)
+        diff -= 65536.0f;
+    else if (diff < -32768.0f)
+        diff += 65536.0f;
+
+    float nextHue = currentHue + (diff * alpha);
+    if (nextHue < 0.0f)
+        nextHue += 65536.0f;
+    else if (nextHue >= 65536.0f)
+        nextHue -= 65536.0f;
+    return nextHue;
+}
+
+uint8_t motionBrightnessFromIntensity(float motionIntensity)
+{
+    float clamped = constrain(motionIntensity, GYRO_MIN_THRESHOLD, GYRO_MAX_THRESHOLD);
+    float t = (clamped - GYRO_MIN_THRESHOLD) / (GYRO_MAX_THRESHOLD - GYRO_MIN_THRESHOLD);
+    float value = MOTION_MIN_BRIGHTNESS + (t * (MOTION_MAX_BRIGHTNESS - MOTION_MIN_BRIGHTNESS));
+    return (uint8_t)constrain(value, (float)MOTION_MIN_BRIGHTNESS, (float)MOTION_MAX_BRIGHTNESS);
+}
+
+void tickMotionVisualizer()
+{
+    if (!mpuReady)
+        return;
+    if ((millis() - motionLastSample) < MOTION_SAMPLE_MS)
+        return;
+    motionLastSample = millis();
+
+    if (!readMpuSample()) {
+        Serial.println("[Visualizer] MPU6050 read failed");
+        return;
+    }
+
+    float gyroMagnitude = currentGyroMagnitudeDps();
+    float accelMagnitude = currentAccelMagnitudeG();
+    float motionIntensity = (MOTION_GYRO_WEIGHT * gyroMagnitude) +
+                            (MOTION_ACCEL_WEIGHT * accelMagnitude);
+
+    float motionAngle = atan2f(gyroYDps, gyroXDps);
+    float targetHue = ((motionAngle + PI) / (2.0f * PI)) * 65535.0f;
+    uint8_t targetBrightness = motionBrightnessFromIntensity(motionIntensity);
+
+    if (!visualizerSmoothingReady) {
+        visualizerHueSmoothed = targetHue;
+        visualizerBrightnessSmoothed = targetBrightness;
+        visualizerSmoothingReady = true;
+    } else {
+        if (gyroMagnitude >= GYRO_MIN_THRESHOLD) {
+            visualizerHueSmoothed = smoothCircularHue(visualizerHueSmoothed,
+                                                      targetHue,
+                                                      MOTION_HUE_SMOOTHING);
+        }
+        visualizerBrightnessSmoothed +=
+            ((float)targetBrightness - visualizerBrightnessSmoothed) * MOTION_BRIGHT_SMOOTHING;
+    }
+
+    uint16_t hue = (uint16_t)constrain(visualizerHueSmoothed, 0.0f, 65535.0f);
+    uint8_t brightness = (uint8_t)constrain(visualizerBrightnessSmoothed,
+                                            (float)MOTION_MIN_BRIGHTNESS,
+                                            (float)MOTION_MAX_BRIGHTNESS);
+    uint32_t color = strip.ColorHSV(hue, 255, brightness);
+
+    strip.setBrightness(255);
+    strip.fill(color);
+    strip.show();
+
+    lastAccelMagnitudeG = accelMagnitude;
+
+    if ((millis() - visualizerLastLog) >= MOTION_VISUALIZER_LOG_MS) {
+        visualizerLastLog = millis();
+        Serial.printf("[Visualizer] gx=%+.0f gy=%+.0f gz=%+.0f mag=%.0f hue=%u brightness=%u\n",
+                      gyroXDps, gyroYDps, gyroZDps, gyroMagnitude, hue, brightness);
+    }
+}
+
 void triggerClashEffect(float totalG, float deltaG)
 {
     float peakAccelG = totalG;
@@ -878,6 +1057,7 @@ void enterConfigMode() {
     Serial.println("[Config] Entering Wi-Fi config mode");
 
     // Turn blade off cleanly first
+    strip.setBrightness(currentBrightness);
     strip.clear();
     strip.show();
     currentState = STATE_CONFIG;
@@ -1035,6 +1215,10 @@ void loop() {
                 tickColorFade();
                 tickFlicker();
             }
+            break;
+
+        case STATE_MOTION_VISUALIZER:
+            tickMotionVisualizer();
             break;
 
         case STATE_RETRACTING:
